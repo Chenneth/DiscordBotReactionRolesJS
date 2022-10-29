@@ -4,7 +4,7 @@ const path = require('node:path');
 
 const { Client, Events, GatewayIntentBits, Partials, Collection} = require('discord.js');
 
-//will someone please tell me how to typescript json properly?
+//will someone please tell me how to typescript/jsdoc json properly?
 /**
  * @type {any} watchableMessages
  * @type {string} watchableMessages.id
@@ -12,7 +12,7 @@ const { Client, Events, GatewayIntentBits, Partials, Collection} = require('disc
  * @type {string} watchableMessages.guildId
  * @type {[x: number]} watchableMessages.emojiIds
  */
-const { token, channelId, watchableMessages, emojis } = require('./config.json');
+const { token, channelId, watchableMessages, emojis, clientId } = require('./config.json');
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessageReactions],
     partials: [Partials.Message, Partials.Reaction],
@@ -69,16 +69,21 @@ client.on("ready", ()=>
                     client.channels.cache.get(channelId).messages.fetch(message.id).then(
                         /*Success*/(messageMatch)=>{
                             emojis.forEach((emoji)=> {
-                                //for consistency's sake, we add each reaction we monitor to the message (so numbers aren't weirdly skewed)
+                                //for consistency's sake, we add each reaction we monitor to the message (so numbers aren't weirdly skewed if you care about that)
                                 emoji.messageIds.forEach((emojiMessageId)=> {
                                     if(emojiMessageId==messageMatch.id)
                                     {
-                                        console.log(`Adding emoji with ID ${emoji.id} to message with ID ${emojiMessageId}`);
                                         messageMatch.react(emoji.id);
+                                        if(messageMatch.reactions.cache.get(emoji.id)==null)
+                                        {
+                                            console.log("Couldn't find any users on this thingy!");
+                                            return;
+                                        }
+                                        console.log(`Adding emoji with ID ${emoji.id} to message with ID ${emojiMessageId}`);
                                         if(oldUsers.has(messageMatch.id))
-                                            oldUsers.get(messageMatch.id).set(emoji.id,messageMatch.reactions.cache.get(emojiMessageId).users.cache);
+                                            oldUsers.get(messageMatch.id).set(emoji.id,messageMatch.reactions.cache.get(emoji.id).users.cache);
                                         else
-                                            oldUsers.set(messageMatch.id,new Map([[emoji.id,messageMatch.reactions.cache.get(emojiMessageId).users.cache]])) //i'm going to laugh if this fails
+                                            oldUsers.set(messageMatch.id,new Map([[emoji.id,messageMatch.reactions.cache.get(emoji.id).users.cache]])) //i'm going to laugh if this fails
                                     }
                                 })
                             })
@@ -156,17 +161,57 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
         console.log(`Could not find emoji with ID ${reaction.emoji.id}.`);
         return;
     }
-    (await reaction.users.fetch()).forEach((user,snowflake,map)=>
-    {
-        let newUser = oldUsers[reaction.message.id].fetch(user);
-        if(newUser==null) //will be null if we couldn't fetch the new user from the oldUsers list
+    /**
+     * @type {boolean}
+     */
+    let needToAddSelf = false;
+    reaction.users.fetch().then((userResult)=> {
+        if(userResult.size<1) //literally impossible because of the kind of event, but we'll error check just in case something changes between the fetches
         {
-            console.log(`Found a new user `)
-            reaction.message.guild.members.fetch(newUser).roles.add(emojiToRole.get(reaction.message.guildId).get(reaction.emoji.id));
+            needToAddSelf = true;
+            return Promise.reject(new Error("Could not find any users for the reaction!"));
         }
+            if (userResult.size == 1 && userResult.has(clientId)) {
+                console.log("Added reaction was from self, ignored");
+                return;
+            }
+            if(!userResult.has(clientId)) {
+                console.log("This bot's reaction was removed! Don't do that!");
+                needToAddSelf = true;
+            }
+            if(!oldUsers.has(reaction.message.id))
+               addRoleToAll(userResult,reaction)
+            else if(!oldUsers[reaction.message.id].has(reaction.emoji.id))
+                addRoleToAll(userResult, reaction);
+            else //we can do a comparison between the older user list
+                userResult.forEach(async (user) => {
+                    if (user.id == clientId) //because the bot should always have a reaction on the message
+                        return;
+                    let oldUser = oldUsers[reaction.message.id][reaction.emoji.id].get(user.id);
+                    if(oldUser==null)
+                    {
+                        console.log(`Found a new user `);
+                        reaction.message.guild.members.fetch(oldUser).then((guildMember)=> {
+                            guildMember.roles.add(emojiToRole.get(reaction.message.guildId).get(reaction.emoji.id));
+                        },(err)=>{
+                            console.log(`Something went wrong with finding the guildMember: ${err}`);
+                        });
+                    }
+                    else console.log(`Already seen user with ID ${user.id}`);
+                })
+    }
+    )/*.catch((err)=>{console.log(`Something went wrong while fetching the users: ${err}`)})
+        .finally(()=>{
+        oldUsers.set(reaction.message.id,reaction.users.cache);
+        console.log(`Finished checking message`);
+    })*/;
+    if(needToAddSelf)
+    {
+        try {
+            await reaction.message.react(reaction.emoji);
+        } catch(err) {console.log(`Something went wrong trying to react to the message: ${err}`);}
+    }
 
-    });
-    oldUsers.set(reaction.message.id,reaction.users.cache);
 /*
     // Now the message has been cached and is fully available
     console.log(`${reaction.message.author}'s message "${reaction.message.content}" gained a reaction!`);
@@ -193,25 +238,6 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
 client.once(Events.ClientReady, c => {
     console.log(`Ready! Logged in as ${c.user.tag}`);
 });
-/*
-client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const command = interaction.client.commands.get(interaction.commandName);
-
-    if (!command) {
-        console.error(`No command matching ${interaction.commandName} was found.`);
-        return;
-    }
-
-    try {
-        await command.execute(interaction);
-    } catch (error) {
-        console.error(error);
-        await interaction.reply({ content: 'There was an error while executing this command!', ephemeral: true });
-    }
-});
-*/
 
 // Log in to Discord with your client's token
 client.login(token);
@@ -224,13 +250,14 @@ client.login(token);
  */
 function hasEmoji(emoji)
 {
-    emojis.forEach((item)=>
+    //todo: in this case we're using the every for early termination of our foreach... later I will compress this to return the not of it instead of using an if, right now we are testing though
+    if(emojis.every((item)=> {if(emoji.id.toString()==item.id) return false;}))
     {
-        if(emoji.id==item.id)
-            return true;
-    })
-    Console.log(`could not find emoji ${emoji}`)
-    return false;
+        console.log(`could not find emoji ${emoji.id}`);
+        return false;
+    }
+    console.log("Found match");
+    return true;
 }
 
 /**
@@ -259,4 +286,18 @@ function watchableMessagesHasVal(value, valueType)
                 return true;
         })
     return false;
+}
+
+function addRoleToAll(userResult, reaction) {
+    console.log("oldUsers list did not have the message's reaction, we'll add the role to the new user.")
+    userResult.forEach(async (user) => {
+        if (user.id == clientId)
+            return;
+        reaction.message.guild.members.fetch(user.id).then((guildMember) => {
+            //todo: I would love to check if the user has roles, but there's no method in the library for that (at least under GuildMember)
+            guildMember.roles.add(emojiToRole.get(reaction.message.guildId).get(reaction.emoji.id));
+        }, (err) => {
+            console.log(`Something went wrong with finding the guildMember: ${err}`);
+        });
+    })
 }
